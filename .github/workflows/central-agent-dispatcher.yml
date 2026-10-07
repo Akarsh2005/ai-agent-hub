@@ -1,0 +1,154 @@
+name: Central AI Agent Dispatcher
+
+on:
+  repository_dispatch:
+    types: [jira_ai_task]
+
+jobs:
+  dispatch-agent:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Inspect Incoming Task
+        run: |
+          echo "Target Repo: ${{ github.event.client_payload.target_repo }}"
+          echo "Jira Key:    ${{ github.event.client_payload.jira_key }}"
+          echo "Summary:     ${{ github.event.client_payload.summary }}"
+          echo "Agent:       ${{ github.event.client_payload.agent }}"
+
+      - name: Checkout Target Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.target_repo }}
+          token: ${{ secrets.CENTRAL_HUB_PAT }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Prepare Git Branch
+        id: branch_info
+        env:
+          JIRA_KEY: ${{ github.event.client_payload.jira_key }}
+          SUMMARY: ${{ github.event.client_payload.summary }}
+        run: |
+          SAFE_KEY="${JIRA_KEY:-TASK}"
+          SLUG=$(echo "$SUMMARY" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-30)
+          BRANCH_NAME="feature/${SAFE_KEY}-${SLUG}"
+
+          git config user.name "central-ai-agent[bot]"
+          git config user.email "ai-agent@users.noreply.github.com"
+          git checkout -b "$BRANCH_NAME"
+
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "jira_key=$SAFE_KEY" >> $GITHUB_OUTPUT
+
+      # ------------------------------------------------------------------
+      # RUN GEMINI AGENT (when agent is 'gemini')
+      # ------------------------------------------------------------------
+      - name: Run Gemini Agent
+        if: github.event.client_payload.agent == 'gemini' || github.event.client_payload.agent == ''
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TASK_TITLE: ${{ github.event.client_payload.summary }}
+          TASK_DESC: ${{ github.event.client_payload.description }}
+        run: |
+          npm install @google/genai
+
+          cat << 'EOF' > run_gemini.mjs
+          import { GoogleGenAI } from '@google/genai';
+          import fs from 'fs';
+          import path from 'path';
+
+          const ai = new GoogleGenAI({});
+
+          async function run() {
+            const task = (process.env.TASK_TITLE || "") + "\n\n" + (process.env.TASK_DESC || "");
+            const prompt = `You are an automated software engineer. Implement the feature described in this task:
+            ${task}
+
+            Return your response ONLY as a JSON array of files to create or modify:
+            [
+              {
+                "path": "relative/path/to/file.ext",
+                "content": "full updated or new content of the file"
+              }
+            ]
+            Do not include markdown ticks around JSON. Output pure valid JSON.`;
+
+            const response = await ai.models.generateContent({
+              model: 'gemini-2.5-pro',
+              contents: prompt,
+            });
+
+            const text = response.text.trim().replace(/^```json/, '').replace(/```$/, '').trim();
+            const files = JSON.parse(text);
+
+            for (const file of files) {
+              const dir = path.dirname(file.path);
+              if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+              fs.writeFileSync(file.path, file.content, 'utf8');
+              console.log(`Updated/Created: ${file.path}`);
+            }
+          }
+
+          run().catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
+          EOF
+
+          node run_gemini.mjs
+          rm run_gemini.mjs
+
+      # ------------------------------------------------------------------
+      # RUN CLAUDE AGENT (when agent is 'claude')
+      # ------------------------------------------------------------------
+      - name: Run Claude Code Agent
+        if: github.event.client_payload.agent == 'claude'
+        timeout-minutes: 15
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TASK_TITLE: ${{ github.event.client_payload.summary }}
+          TASK_DESC: ${{ github.event.client_payload.description }}
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          PROMPT="Implement task: ${TASK_TITLE}
+          Details:
+          ${TASK_DESC}
+          Rules:
+          - Modify files to meet acceptance criteria.
+          - Exit cleanly when done."
+
+          claude -p "$PROMPT" --dangerously-skip-permissions
+
+      # ------------------------------------------------------------------
+      # COMMIT, PUSH AND CREATE DRAFT PR ON TARGET REPO
+      # ------------------------------------------------------------------
+      - name: Commit, Push and Open PR
+        env:
+          GH_TOKEN: ${{ secrets.CENTRAL_HUB_PAT }}
+          TARGET_REPO: ${{ github.event.client_payload.target_repo }}
+          JIRA_KEY: ${{ steps.branch_info.outputs.jira_key }}
+          SUMMARY: ${{ github.event.client_payload.summary }}
+          BRANCH_NAME: ${{ steps.branch_info.outputs.branch_name }}
+          AGENT: ${{ github.event.client_payload.agent || 'gemini' }}
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "[$JIRA_KEY] $SUMMARY"
+            git push origin "$BRANCH_NAME"
+
+            gh pr create \
+              --repo "$TARGET_REPO" \
+              --draft \
+              --title "[$JIRA_KEY] $SUMMARY" \
+              --body "Automated PR generated by **$AGENT** agent via Central AI Hub.
+              
+              Jira Ticket: **$JIRA_KEY**" \
+              --head "$BRANCH_NAME"
+          else
+            echo "No file changes produced by agent."
+          fi
