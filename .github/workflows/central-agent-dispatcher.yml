@@ -86,10 +86,10 @@ jobs:
           echo "jira_key=$SAFE_KEY" >> $GITHUB_OUTPUT
 
       # ------------------------------------------------------------------
-      # OPTION 1: GEMINI AGENT (when agent is 'gemini')
+      # OPTION 1: GEMINI AGENT
       # ------------------------------------------------------------------
       - name: Run Gemini Agent
-        if: github.event.client_payload.agent == 'gemini'
+        if: contains(github.event.client_payload.labels, 'gemini-agent') || github.event.client_payload.agent == 'gemini' || (!contains(github.event.client_payload.labels, 'claude-agent') && github.event.client_payload.agent != 'claude')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TASK_TITLE: ${{ github.event.client_payload.summary }}
@@ -147,7 +147,7 @@ jobs:
       # OPTION 2: CLAUDE CODE (via AWS Bedrock OR Anthropic API)
       # ------------------------------------------------------------------
       - name: Run Claude Code Agent
-        if: github.event.client_payload.agent == 'claude' || github.event.client_payload.agent == 'bedrock'
+        if: contains(github.event.client_payload.labels, 'claude-agent') || contains(github.event.client_payload.labels, 'bedrock-agent') || github.event.client_payload.agent == 'claude' || github.event.client_payload.agent == 'bedrock'
         timeout-minutes: 15
         env:
           # AWS Bedrock Configuration (active if AWS keys are provided)
