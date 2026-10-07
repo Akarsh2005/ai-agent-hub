@@ -11,6 +11,6 @@ This repository serves as the central hub connecting Jira Cloud automation with 
 5. Jira native integration detects the PR and auto-transitions the ticket to `In Review`.
 
 ## Secrets Required
-- `GEMINI_API_KEY`: API Key for Google Gemini 2.5 Pro.
-- `ANTHROPIC_API_KEY`: API Key for Anthropic Claude Code CLI.
+- `GEMINI_API_KEY`: API Key for Google Gemini (model set via `GEMINI_MODEL`, default `gemini-3.1-pro-preview`).
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`: AWS Bedrock credentials used by Claude Code (Claude runs only through Bedrock).
 - `CENTRAL_HUB_PAT`: GitHub Fine-grained PAT with read/write access to target repos.

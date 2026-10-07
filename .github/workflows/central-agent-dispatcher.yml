@@ -10,11 +10,16 @@ jobs:
 
     steps:
       - name: Inspect Incoming Task
+        env:
+          P_REPO: ${{ github.event.client_payload.target_repo }}
+          P_KEY: ${{ github.event.client_payload.jira_key }}
+          P_SUMMARY: ${{ github.event.client_payload.summary }}
+          P_AGENT: ${{ github.event.client_payload.agent }}
         run: |
-          echo "Target Repo: ${{ github.event.client_payload.target_repo }}"
-          echo "Jira Key:    ${{ github.event.client_payload.jira_key }}"
-          echo "Summary:     ${{ github.event.client_payload.summary }}"
-          echo "Agent:       ${{ github.event.client_payload.agent }}"
+          echo "Target Repo: $P_REPO"
+          echo "Jira Key:    $P_KEY"
+          echo "Summary:     $P_SUMMARY"
+          echo "Agent:       $P_AGENT"
 
       - name: Normalize Target Repository
         id: repo_prep
@@ -66,7 +71,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Prepare Git Branch
         id: branch_info
@@ -119,7 +124,7 @@ jobs:
             Do not include markdown ticks around JSON. Output pure valid JSON.`;
 
             const response = await ai.models.generateContent({
-              model: 'gemini-2.5-pro',
+              model: process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview',
               contents: prompt,
             });
 
@@ -150,15 +155,12 @@ jobs:
         if: contains(github.event.client_payload.labels, 'claude-agent') || contains(github.event.client_payload.labels, 'bedrock-agent') || github.event.client_payload.agent == 'claude' || github.event.client_payload.agent == 'bedrock'
         timeout-minutes: 15
         env:
-          # AWS Bedrock Configuration (active if AWS keys are provided)
-          CLAUDE_CODE_USE_BEDROCK: ${{ secrets.AWS_ACCESS_KEY_ID != '' && '1' || '' }}
+          # AWS Bedrock Configuration (Claude runs only through Bedrock)
+          CLAUDE_CODE_USE_BEDROCK: '1'
           AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
-
-          # Anthropic Direct API Key (active if using Anthropic Console)
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
           TASK_TITLE: ${{ github.event.client_payload.summary }}
           TASK_DESC: ${{ github.event.client_payload.description }}
