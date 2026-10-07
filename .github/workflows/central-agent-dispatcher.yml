@@ -21,19 +21,38 @@ jobs:
         env:
           RAW_REPO: ${{ github.event.client_payload.target_repo }}
           RAW_DESC: ${{ github.event.client_payload.description }}
+          JIRA_LABELS: ${{ toJson(github.event.client_payload.labels || '') }}
         run: |
-          # If target_repo is empty, check if a github URL was typed in the Jira description:
           INPUT_REPO="$RAW_REPO"
+
+          # 1. Check if any Jira label contains a full github.com URL:
+          LABEL_URL=$(echo "$JIRA_LABELS" | grep -oE 'https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' | head -n 1 || echo "")
+          if [ -n "$LABEL_URL" ]; then
+            INPUT_REPO="$LABEL_URL"
+          fi
+
+          # 2. Check if any Jira label has repo: prefix:
+          LABEL_REPO=$(echo "$JIRA_LABELS" | grep -oE 'repo:[A-Za-z0-9_./-]+' | head -n 1 | sed 's/repo://' || echo "")
+          if [ -z "$INPUT_REPO" ] && [ -n "$LABEL_REPO" ]; then
+            INPUT_REPO="$LABEL_REPO"
+          fi
+
+          # 3. Check if Jira description contains a github.com URL:
           if [ -z "$INPUT_REPO" ]; then
             INPUT_REPO=$(echo "$RAW_DESC" | grep -oE 'https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' | head -n 1 || echo "")
           fi
 
           # Clean full URL down to owner/repo (e.g. https://github.com/Akarsh2005/demo1 -> Akarsh2005/demo1)
-          CLEAN_REPO=$(echo "$INPUT_REPO" | sed -E 's|https?://github.com/||; s|\.git$||' | tr -d ' ')
-          
-          # Fallback to default if not detected
+          CLEAN_REPO=$(echo "$INPUT_REPO" | sed -E 's|https?://github.com/||; s|\.git$||' | tr -d ' "')
+
+          # If only repo name was given without owner (e.g. 'demo1'), default owner to Akarsh2005
+          if [[ "$CLEAN_REPO" != *"/"* ]] && [ -n "$CLEAN_REPO" ]; then
+            CLEAN_REPO="Akarsh2005/$CLEAN_REPO"
+          fi
+
+          # Fallback default if nothing was matched
           FINAL_REPO="${CLEAN_REPO:-Akarsh2005/demo1}"
-          
+
           echo "Target normalized repo: $FINAL_REPO"
           echo "target_repo=$FINAL_REPO" >> $GITHUB_OUTPUT
 
