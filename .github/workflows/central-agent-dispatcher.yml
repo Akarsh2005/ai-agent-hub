@@ -19,7 +19,7 @@ jobs:
       - name: Normalize Target Repository
         id: repo_prep
         env:
-          RAW_REPO: ${{ github.event.client_payload.target_repo }}
+          RAW_REPO: ${{ github.event.client_payload.target_url || github.event.client_payload.target_repo }}
           RAW_DESC: ${{ github.event.client_payload.description }}
           JIRA_LABELS: ${{ toJson(github.event.client_payload.labels || '') }}
         run: |
