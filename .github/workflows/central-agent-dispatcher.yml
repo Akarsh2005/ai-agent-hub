@@ -97,6 +97,7 @@ jobs:
         if: contains(github.event.client_payload.labels, 'gemini-agent') || github.event.client_payload.agent == 'gemini' || (!contains(github.event.client_payload.labels, 'claude-agent') && github.event.client_payload.agent != 'claude')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           TASK_TITLE: ${{ github.event.client_payload.summary }}
           TASK_DESC: ${{ github.event.client_payload.description }}
         run: |
@@ -123,10 +124,20 @@ jobs:
             ]
             Do not include markdown ticks around JSON. Output pure valid JSON.`;
 
-            const response = await ai.models.generateContent({
-              model: process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview',
-              contents: prompt,
-            });
+            // Try the configured model first, then fall back if it is retired (404) or out of quota (429).
+            const models = [process.env.GEMINI_MODEL, 'gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-3.1-pro-preview'].filter(Boolean);
+            let response;
+            for (const model of models) {
+              try {
+                console.log(`Trying model: ${model}`);
+                response = await ai.models.generateContent({ model, contents: prompt });
+                break;
+              } catch (err) {
+                if (![404, 429].includes(err.status)) throw err;
+                console.warn(`Model ${model} unavailable (${err.status}), trying next...`);
+              }
+            }
+            if (!response) throw new Error('No Gemini model was available for this API key.');
 
             const text = response.text.trim().replace(/^```json/, '').replace(/```$/, '').trim();
             const files = JSON.parse(text);
