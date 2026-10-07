@@ -16,10 +16,31 @@ jobs:
           echo "Summary:     ${{ github.event.client_payload.summary }}"
           echo "Agent:       ${{ github.event.client_payload.agent }}"
 
+      - name: Normalize Target Repository
+        id: repo_prep
+        env:
+          RAW_REPO: ${{ github.event.client_payload.target_repo }}
+          RAW_DESC: ${{ github.event.client_payload.description }}
+        run: |
+          # If target_repo is empty, check if a github URL was typed in the Jira description:
+          INPUT_REPO="$RAW_REPO"
+          if [ -z "$INPUT_REPO" ]; then
+            INPUT_REPO=$(echo "$RAW_DESC" | grep -oE 'https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' | head -n 1 || echo "")
+          fi
+
+          # Clean full URL down to owner/repo (e.g. https://github.com/Akarsh2005/demo1 -> Akarsh2005/demo1)
+          CLEAN_REPO=$(echo "$INPUT_REPO" | sed -E 's|https?://github.com/||; s|\.git$||' | tr -d ' ')
+          
+          # Fallback to default if not detected
+          FINAL_REPO="${CLEAN_REPO:-Akarsh2005/demo1}"
+          
+          echo "Target normalized repo: $FINAL_REPO"
+          echo "target_repo=$FINAL_REPO" >> $GITHUB_OUTPUT
+
       - name: Checkout Target Repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.client_payload.target_repo }}
+          repository: ${{ steps.repo_prep.outputs.target_repo }}
           token: ${{ secrets.CENTRAL_HUB_PAT }}
           fetch-depth: 0
 
@@ -139,7 +160,7 @@ jobs:
       - name: Commit, Push and Open PR
         env:
           GH_TOKEN: ${{ secrets.CENTRAL_HUB_PAT }}
-          TARGET_REPO: ${{ github.event.client_payload.target_repo }}
+          TARGET_REPO: ${{ steps.repo_prep.outputs.target_repo }}
           JIRA_KEY: ${{ steps.branch_info.outputs.jira_key }}
           SUMMARY: ${{ github.event.client_payload.summary }}
           BRANCH_NAME: ${{ steps.branch_info.outputs.branch_name }}
