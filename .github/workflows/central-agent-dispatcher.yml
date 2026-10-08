@@ -299,11 +299,15 @@ jobs:
 
           ADDED=""
           for R in $REVIEWERS; do
-            if gh pr edit "$PR_URL" --add-reviewer "$R"; then
-              echo "Requested review from: $R"
+            PR_NUM="${PR_URL##*/}"
+            # REST API returns the resulting reviewer list, so we can verify instead of trusting the exit code.
+            RESP=$(gh api -X POST "repos/$TARGET_REPO/pulls/$PR_NUM/requested_reviewers" -f "reviewers[]=$R" 2>&1) || true
+            if echo "$RESP" | jq -e --arg r "$R" '[.requested_reviewers[]?.login | ascii_downcase] | index($r | ascii_downcase)' >/dev/null 2>&1; then
+              echo "Requested review from: $R (confirmed on PR)"
               ADDED="${ADDED:+$ADDED, }$R"
             else
-              echo "::warning::Could not request review from '$R' (check the username and that they accepted the collaborator invite on $TARGET_REPO)."
+              echo "::warning::Review NOT registered for '$R'. GitHub response: $(echo "$RESP" | head -c 400)"
+              echo "Check: exact username, and that they ACCEPTED the collaborator invite on $TARGET_REPO."
             fi
           done
 
