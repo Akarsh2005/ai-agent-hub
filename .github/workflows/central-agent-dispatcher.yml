@@ -64,6 +64,22 @@ jobs:
           echo "Summary:     $P_SUMMARY"
           echo "Agent:       $P_AGENT"
 
+      # Single source of truth for which agent runs (labels win over the payload field).
+      #   bedrock-agent / claude-agent -> bedrock (Claude via AWS Bedrock)
+      #   gemini-agent                 -> gemini
+      #   nothing recognised           -> gemini (default)
+      - name: Select Agent
+        id: agent
+        env:
+          JIRA_LABELS: ${{ toJson(github.event.client_payload.labels || '') }}
+        run: |
+          # Gemini is disabled for now: every task runs on Claude via AWS Bedrock.
+          if echo "$JIRA_LABELS" | grep -qi 'gemini-agent'; then
+            echo "::warning::gemini-agent label found, but Gemini is disabled. Running Bedrock instead."
+          fi
+          echo "Selected agent: bedrock"
+          echo "agent=bedrock" >> "$GITHUB_OUTPUT"
+
       - name: Jira - Set In Progress
         run: '"$RUNNER_TEMP/jira.sh" "In Progress" "AI agent started working on this ticket. Run: $RUN_URL"'
 
@@ -139,88 +155,90 @@ jobs:
 
       # ------------------------------------------------------------------
       # OPTION 1: GEMINI AGENT
+      # GEMINI AGENT IS DISABLED FOR NOW (Bedrock-only testing). To re-enable: uncomment the step below
+      # and restore the gemini branch in the "Select Agent" step.
       # ------------------------------------------------------------------
-      - name: Run Gemini Agent
-        if: contains(github.event.client_payload.labels, 'gemini-agent') || github.event.client_payload.agent == 'gemini' || (!contains(github.event.client_payload.labels, 'claude-agent') && github.event.client_payload.agent != 'claude')
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
-          TASK_TITLE: ${{ github.event.client_payload.summary }}
-          TASK_DESC: ${{ github.event.client_payload.description }}
-        run: |
-          # Install the SDK and keep the script OUTSIDE the target repo workspace, so node_modules,
-          # package.json and package-lock.json are never committed to the target repo.
-          GEMINI_DIR="$RUNNER_TEMP/gemini-agent"
-          mkdir -p "$GEMINI_DIR"
-          (cd "$GEMINI_DIR" && npm init -y >/dev/null && npm install @google/genai)
-
-          cat << 'EOF' > "$GEMINI_DIR/run_gemini.mjs"
-          import { GoogleGenAI } from '@google/genai';
-          import fs from 'fs';
-          import path from 'path';
-
-          const ai = new GoogleGenAI({});
-
-          async function run() {
-            const task = (process.env.TASK_TITLE || "") + "\n\n" + (process.env.TASK_DESC || "");
-            const prompt = `You are an automated software engineer. Implement the feature described in this task:
-            ${task}
-
-            Return your response ONLY as a JSON array of files to create or modify:
-            [
-              {
-                "path": "relative/path/to/file.ext",
-                "content": "full updated or new content of the file"
-              }
-            ]
-            Do not include markdown ticks around JSON. Output pure valid JSON.`;
-
-            // Try the configured model first, then fall back if it is retired (404) or out of quota (429).
-            const models = [process.env.GEMINI_MODEL, 'gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-3.1-pro-preview'].filter(Boolean);
-            let response;
-            for (const model of models) {
-              try {
-                console.log(`Trying model: ${model}`);
-                response = await ai.models.generateContent({ model, contents: prompt });
-                break;
-              } catch (err) {
-                if (![404, 429].includes(err.status)) throw err;
-                console.warn(`Model ${model} unavailable (${err.status}), trying next...`);
-              }
-            }
-            if (!response) throw new Error('No Gemini model was available for this API key.');
-
-            const text = response.text.trim().replace(/^```json/, '').replace(/```$/, '').trim();
-            const files = JSON.parse(text);
-
-            const root = process.cwd();
-            for (const file of files) {
-              // Only write inside the repo checkout (reject absolute paths and ../ escapes).
-              const target = path.resolve(root, file.path);
-              if (!target.startsWith(root + path.sep)) {
-                console.warn(`Skipping path outside repo: ${file.path}`);
-                continue;
-              }
-              fs.mkdirSync(path.dirname(target), { recursive: true });
-              fs.writeFileSync(target, file.content, 'utf8');
-              console.log(`Updated/Created: ${file.path}`);
-            }
-          }
-
-          run().catch(err => {
-            console.error(err);
-            process.exit(1);
-          });
-          EOF
-
-          # Run from the repo checkout (cwd) so files are written there; imports resolve from the script's own folder.
-          node "$GEMINI_DIR/run_gemini.mjs"
+      # - name: Run Gemini Agent
+      #   if: steps.agent.outputs.agent == 'gemini'
+      #   env:
+      #     GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      #     GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+      #     TASK_TITLE: ${{ github.event.client_payload.summary }}
+      #     TASK_DESC: ${{ github.event.client_payload.description }}
+      #   run: |
+      #     # Install the SDK and keep the script OUTSIDE the target repo workspace, so node_modules,
+      #     # package.json and package-lock.json are never committed to the target repo.
+      #     GEMINI_DIR="$RUNNER_TEMP/gemini-agent"
+      #     mkdir -p "$GEMINI_DIR"
+      #     (cd "$GEMINI_DIR" && npm init -y >/dev/null && npm install @google/genai)
+      #
+      #     cat << 'EOF' > "$GEMINI_DIR/run_gemini.mjs"
+      #     import { GoogleGenAI } from '@google/genai';
+      #     import fs from 'fs';
+      #     import path from 'path';
+      #
+      #     const ai = new GoogleGenAI({});
+      #
+      #     async function run() {
+      #       const task = (process.env.TASK_TITLE || "") + "\n\n" + (process.env.TASK_DESC || "");
+      #       const prompt = `You are an automated software engineer. Implement the feature described in this task:
+      #       ${task}
+      #
+      #       Return your response ONLY as a JSON array of files to create or modify:
+      #       [
+      #         {
+      #           "path": "relative/path/to/file.ext",
+      #           "content": "full updated or new content of the file"
+      #         }
+      #       ]
+      #       Do not include markdown ticks around JSON. Output pure valid JSON.`;
+      #
+      #       // Try the configured model first, then fall back if it is retired (404) or out of quota (429).
+      #       const models = [process.env.GEMINI_MODEL, 'gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-3.1-pro-preview'].filter(Boolean);
+      #       let response;
+      #       for (const model of models) {
+      #         try {
+      #           console.log(`Trying model: ${model}`);
+      #           response = await ai.models.generateContent({ model, contents: prompt });
+      #           break;
+      #         } catch (err) {
+      #           if (![404, 429].includes(err.status)) throw err;
+      #           console.warn(`Model ${model} unavailable (${err.status}), trying next...`);
+      #         }
+      #       }
+      #       if (!response) throw new Error('No Gemini model was available for this API key.');
+      #
+      #       const text = response.text.trim().replace(/^```json/, '').replace(/```$/, '').trim();
+      #       const files = JSON.parse(text);
+      #
+      #       const root = process.cwd();
+      #       for (const file of files) {
+      #         // Only write inside the repo checkout (reject absolute paths and ../ escapes).
+      #         const target = path.resolve(root, file.path);
+      #         if (!target.startsWith(root + path.sep)) {
+      #           console.warn(`Skipping path outside repo: ${file.path}`);
+      #           continue;
+      #         }
+      #         fs.mkdirSync(path.dirname(target), { recursive: true });
+      #         fs.writeFileSync(target, file.content, 'utf8');
+      #         console.log(`Updated/Created: ${file.path}`);
+      #       }
+      #     }
+      #
+      #     run().catch(err => {
+      #       console.error(err);
+      #       process.exit(1);
+      #     });
+      #     EOF
+      #
+      #     # Run from the repo checkout (cwd) so files are written there; imports resolve from the script's own folder.
+      #     node "$GEMINI_DIR/run_gemini.mjs"
 
       # ------------------------------------------------------------------
-      # OPTION 2: CLAUDE CODE (via AWS Bedrock OR Anthropic API)
+      # CLAUDE CODE (via AWS Bedrock ONLY - no direct Anthropic API)
       # ------------------------------------------------------------------
       - name: Run Claude Code Agent
-        if: contains(github.event.client_payload.labels, 'claude-agent') || contains(github.event.client_payload.labels, 'bedrock-agent') || github.event.client_payload.agent == 'claude' || github.event.client_payload.agent == 'bedrock'
+        if: steps.agent.outputs.agent == 'bedrock'
         timeout-minutes: 15
         env:
           # AWS Bedrock Configuration (Claude runs only through Bedrock)
@@ -229,19 +247,54 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          # Optional repo variable (Settings > Variables) to override the default Haiku profile.
+          BEDROCK_MODEL: ${{ vars.BEDROCK_MODEL }}
 
           TASK_TITLE: ${{ github.event.client_payload.summary }}
           TASK_DESC: ${{ github.event.client_payload.description }}
         run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+            echo "::error::AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY secrets are missing."
+            exit 1
+          fi
+          # Bedrock only: make sure no direct Anthropic API credential can be picked up.
+          unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+          [ "$CLAUDE_CODE_USE_BEDROCK" = "1" ] || { echo "::error::Bedrock mode is not enabled."; exit 1; }
+
+          # An empty session token breaks some AWS SDKs; only keep it for temporary (ASIA...) credentials.
+          [ -z "$AWS_SESSION_TOKEN" ] && unset AWS_SESSION_TOKEN
+
+          # Claude Haiku 4.5 via a cross-region inference profile. Prefix must match the region.
+          case "$AWS_REGION" in
+            eu-*) PREFIX=eu ;;
+            ap-*) PREFIX=apac ;;
+            *)    PREFIX=us ;;
+          esac
+          export ANTHROPIC_MODEL="${BEDROCK_MODEL:-$PREFIX.anthropic.claude-haiku-4-5-20251001-v1:0}"
+          export ANTHROPIC_SMALL_FAST_MODEL="$ANTHROPIC_MODEL"
+          echo "Bedrock region: $AWS_REGION"
+          echo "Bedrock model:  $ANTHROPIC_MODEL"
+
           npm install -g @anthropic-ai/claude-code
-          PROMPT="Implement task: ${TASK_TITLE}
+
+          PROMPT="You are an automated software engineer working inside a git checkout of the target repository.
+          Task: ${TASK_TITLE}
+
           Details:
           ${TASK_DESC}
-          Rules:
-          - Modify files to meet acceptance criteria.
-          - Exit cleanly when done."
 
-          claude -p "$PROMPT" --dangerously-skip-permissions
+          Rules:
+          - First look at the existing project structure and follow its conventions (module style, naming).
+          - Implement exactly what the task asks. Create the files named in the task; do not modify unrelated files.
+          - Do not run git commands that change history, do not commit, do not push.
+          - Do not create extra files such as notes, summaries or READMEs unless the task asks for them.
+          - When all requested files are written, stop."
+
+          # File tools + read-only git only. No arbitrary shell, so ticket text cannot make the agent run commands.
+          claude -p "$PROMPT" \
+            --permission-mode acceptEdits \
+            --allowedTools "Read,Write,Edit,MultiEdit,Glob,Grep,LS,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*),Bash(cat:*)" \
+            --max-turns 30
 
       # ------------------------------------------------------------------
       # COMMIT, PUSH AND CREATE DRAFT PR ON TARGET REPO
@@ -254,7 +307,7 @@ jobs:
           JIRA_KEY: ${{ steps.branch_info.outputs.jira_key }}
           SUMMARY: ${{ github.event.client_payload.summary }}
           BRANCH_NAME: ${{ steps.branch_info.outputs.branch_name }}
-          AGENT: ${{ github.event.client_payload.agent || (contains(github.event.client_payload.labels, 'claude-agent') && 'claude') || 'gemini' }}
+          AGENT: ${{ steps.agent.outputs.agent == 'bedrock' && 'claude (AWS Bedrock)' || 'gemini' }}
         run: |
           if [ -z "$(git status --porcelain)" ]; then
             echo "No file changes produced by agent; failing so the Jira ticket is flagged."
