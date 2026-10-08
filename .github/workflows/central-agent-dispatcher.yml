@@ -29,9 +29,14 @@ jobs:
           fi
           AUTH="$JIRA_USER_EMAIL:$JIRA_API_TOKEN"
           API="$JIRA_BASE_URL/rest/api/3/issue/$JIRA_ISSUE_KEY"
-          ID=$(curl -sS -u "$AUTH" -H "Accept: application/json" "$API/transitions" \
-            | jq -r --arg s "$STATUS" '.transitions[]? | select(.to.name == $s) | .id' | head -n 1)
-          if [ -z "$ID" ]; then
+          ID=""
+          if [ -n "$STATUS" ]; then
+            ID=$(curl -sS -u "$AUTH" -H "Accept: application/json" "$API/transitions" \
+              | jq -r --arg s "$STATUS" '.transitions[]? | select(.to.name == $s) | .id' | head -n 1)
+          fi
+          if [ -z "$STATUS" ]; then
+            :
+          elif [ -z "$ID" ]; then
             echo "No transition to '$STATUS' available for $JIRA_ISSUE_KEY."
           else
             CODE=$(curl -sS -o /dev/null -w '%{http_code}' -u "$AUTH" -H "Content-Type: application/json" \
@@ -269,6 +274,41 @@ jobs:
 
           echo "PR created: $PR_URL"
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # REQUEST REVIEWERS (from Jira labels like reviewer:github-username)
+      # Non-fatal: a bad username must not fail the run or the Jira transition.
+      # ------------------------------------------------------------------
+      - name: Request PR Reviewers
+        if: success()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.CENTRAL_HUB_PAT }}
+          TARGET_REPO: ${{ steps.repo_prep.outputs.target_repo }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+          JIRA_LABELS: ${{ toJson(github.event.client_payload.labels || '') }}
+        run: |
+          OWNER="${TARGET_REPO%%/*}"
+          REVIEWERS=$(echo "$JIRA_LABELS" | grep -oiE 'reviewer:[A-Za-z0-9-]+' | sed -E 's/^reviewer://I' | sort -u | grep -vix "$OWNER" || true)
+
+          if [ -z "$REVIEWERS" ]; then
+            echo "No reviewer:<username> labels found; skipping."
+            exit 0
+          fi
+
+          ADDED=""
+          for R in $REVIEWERS; do
+            if gh pr edit "$PR_URL" --add-reviewer "$R"; then
+              echo "Requested review from: $R"
+              ADDED="${ADDED:+$ADDED, }$R"
+            else
+              echo "::warning::Could not request review from '$R' (check the username and that they accepted the collaborator invite on $TARGET_REPO)."
+            fi
+          done
+
+          if [ -n "$ADDED" ] && [ -f "$RUNNER_TEMP/jira.sh" ]; then
+            "$RUNNER_TEMP/jira.sh" "" "Review requested from: $ADDED" || true
+          fi
 
       # ------------------------------------------------------------------
       # JIRA STATUS UPDATES (outcome of the run)
