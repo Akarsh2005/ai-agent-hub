@@ -127,7 +127,8 @@ jobs:
         run: |
           SAFE_KEY="${JIRA_KEY:-TASK}"
           SLUG=$(echo "$SUMMARY" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//' | cut -c1-30 | sed 's/-$//')
-          BRANCH_NAME="feature/${SAFE_KEY}-${SLUG}"
+          # Run number keeps the name unique so retries never collide with an old branch.
+          BRANCH_NAME="feature/${SAFE_KEY}-${SLUG}-r${GITHUB_RUN_NUMBER}"
 
           git config user.name "central-ai-agent[bot]"
           git config user.email "ai-agent@users.noreply.github.com"
