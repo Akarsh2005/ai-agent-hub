@@ -65,7 +65,7 @@ jobs:
           echo "Agent:       $P_AGENT"
 
       - name: Jira - Set In Progress
-        run: '"$RUNNER_TEMP/jira.sh" "In Progress" "AI agent started working on this ticket. Run: $RUN_URL"'
+        run: '"$RUNNER_TEMP/jira.sh" "In Progress"'
 
       - name: Normalize Target Repository
         id: repo_prep
@@ -311,9 +311,8 @@ jobs:
             fi
           done
 
-          if [ -n "$ADDED" ] && [ -f "$RUNNER_TEMP/jira.sh" ]; then
-            "$RUNNER_TEMP/jira.sh" "" "Review requested from: $ADDED" || true
-          fi
+          # No Jira comment here on purpose: Jira only gets "PR created" and "run failed" comments.
+          [ -n "$ADDED" ] && echo "Reviewers requested: $ADDED"
 
       # ------------------------------------------------------------------
       # JIRA STATUS UPDATES (outcome of the run)
