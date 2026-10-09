@@ -239,11 +239,13 @@ jobs:
       # ------------------------------------------------------------------
       - name: Run Claude Code Agent
         if: steps.agent.outputs.agent == 'bedrock'
-        timeout-minutes: 15
+        timeout-minutes: 10
         env:
           # AWS Bedrock Configuration (Claude runs only through Bedrock)
           CLAUDE_CODE_USE_BEDROCK: '1'
           AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+          # Preferred: a Bedrock API key (long-term). Fallback: IAM access keys.
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
@@ -253,16 +255,23 @@ jobs:
           TASK_TITLE: ${{ github.event.client_payload.summary }}
           TASK_DESC: ${{ github.event.client_payload.description }}
         run: |
-          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
-            echo "::error::AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY secrets are missing."
-            exit 1
-          fi
           # Bedrock only: make sure no direct Anthropic API credential can be picked up.
           unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
           [ "$CLAUDE_CODE_USE_BEDROCK" = "1" ] || { echo "::error::Bedrock mode is not enabled."; exit 1; }
 
-          # An empty session token breaks some AWS SDKs; only keep it for temporary (ASIA...) credentials.
-          [ -z "$AWS_SESSION_TOKEN" ] && unset AWS_SESSION_TOKEN
+          # Pick the credential: Bedrock API key wins; otherwise IAM access keys.
+          if [ -n "$AWS_BEARER_TOKEN_BEDROCK" ]; then
+            echo "Auth: Bedrock API key (AWS_BEARER_TOKEN_BEDROCK)"
+            unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+          elif [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
+            echo "Auth: IAM access keys"
+            unset AWS_BEARER_TOKEN_BEDROCK
+            # An empty session token breaks some AWS SDKs; keep it only for temporary (ASIA...) credentials.
+            [ -z "$AWS_SESSION_TOKEN" ] && unset AWS_SESSION_TOKEN
+          else
+            echo "::error::No AWS credentials. Set the AWS_BEARER_TOKEN_BEDROCK secret, or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY."
+            exit 1
+          fi
 
           # Claude Haiku 4.5 via a cross-region inference profile. Prefix must match the region.
           case "$AWS_REGION" in
@@ -270,12 +279,39 @@ jobs:
             ap-*) PREFIX=apac ;;
             *)    PREFIX=us ;;
           esac
-          export ANTHROPIC_MODEL="${BEDROCK_MODEL:-$PREFIX.anthropic.claude-haiku-4-5-20251001-v1:0}"
-          export ANTHROPIC_SMALL_FAST_MODEL="$ANTHROPIC_MODEL"
+          MODEL="${BEDROCK_MODEL:-$PREFIX.anthropic.claude-haiku-4-5-20251001-v1:0}"
+          # Pin every model alias Claude Code may use to the one enabled model (no surprise calls to Sonnet/Opus).
+          export ANTHROPIC_MODEL="$MODEL"
+          export ANTHROPIC_SMALL_FAST_MODEL="$MODEL"
+          export ANTHROPIC_DEFAULT_HAIKU_MODEL="$MODEL"
+          export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
+          export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
           echo "Bedrock region: $AWS_REGION"
-          echo "Bedrock model:  $ANTHROPIC_MODEL"
+          echo "Bedrock model:  $MODEL"
+
+          # Preflight: one tiny Bedrock call so billing / permission / model-access problems fail in seconds
+          # with the real AWS message, instead of after Claude Code's long retry loop.
+          BODY='{"messages":[{"role":"user","content":[{"text":"Reply with: ok"}]}],"inferenceConfig":{"maxTokens":5}}'
+          URL="https://bedrock-runtime.${AWS_REGION}.amazonaws.com/model/${MODEL//:/%3A}/converse"
+          if [ -n "$AWS_BEARER_TOKEN_BEDROCK" ]; then
+            CODE=$(curl -sS -m 30 -o /tmp/preflight.json -w '%{http_code}' -X POST "$URL"               -H "Authorization: Bearer $AWS_BEARER_TOKEN_BEDROCK" -H "Content-Type: application/json" -d "$BODY") || CODE=000
+          else
+            CODE=$(curl -sS -m 30 -o /tmp/preflight.json -w '%{http_code}' -X POST "$URL"               --aws-sigv4 "aws:amz:${AWS_REGION}:bedrock" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY"               ${AWS_SESSION_TOKEN:+-H "x-amz-security-token: $AWS_SESSION_TOKEN"}               -H "Content-Type: application/json" -d "$BODY") || CODE=000
+          fi
+          echo "Bedrock preflight: HTTP $CODE"
+          if [ "$CODE" = "429" ] || [ "${CODE:0:1}" = "5" ] || [ "$CODE" = "000" ]; then
+            echo "::warning::Bedrock preflight inconclusive (HTTP $CODE); continuing."
+          elif [ "$CODE" != "200" ]; then
+            echo "::error::Bedrock preflight failed (HTTP $CODE): $(head -c 500 /tmp/preflight.json)"
+            echo "Fix in AWS: valid payment method, Claude Haiku 4.5 access enabled in $AWS_REGION, and bedrock:InvokeModel* permission."
+            exit 1
+          fi
 
           npm install -g @anthropic-ai/claude-code
+
+          # Keep Claude Code's local files out of the PR.
+          echo '.claude/' >> .git/info/exclude
+          echo '.claude.json' >> .git/info/exclude
 
           PROMPT="You are an automated software engineer working inside a git checkout of the target repository.
           Task: ${TASK_TITLE}
